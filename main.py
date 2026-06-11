@@ -558,6 +558,53 @@ def _call_fal(prompt):
     except urllib.error.HTTPError as e:
         raise ValueError(f"fal.ai loi {e.code}: {e.read().decode()[:200]}")
 
+def _call_fal_img2video(image_url: str, prompt: str, duration: int, aspect_ratio: str) -> str:
+    key = os.getenv("FAL_KEY", "")
+    if not key or key.startswith("your_"):
+        raise ValueError("FAL_KEY chưa được cài đặt trong .env")
+    payload = {"image_url": image_url, "prompt": prompt or "Animate this interior design scene smoothly",
+               "duration": str(duration), "aspect_ratio": aspect_ratio}
+    req = urllib.request.Request(
+        "https://fal.run/fal-ai/kling-video/v1.6/standard/image-to-video",
+        data=json.dumps(payload).encode(), method="POST",
+        headers={"Authorization": f"Key {key}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            result = json.loads(r.read().decode())
+            if "video" in result:
+                return result["video"]["url"]
+            raise ValueError(f"Unexpected response: {str(result)[:200]}")
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"FAL.ai lỗi {e.code}: {e.read().decode()[:300]}")
+
+def _call_fal_video(prompt: str, model: str, duration: int, aspect_ratio: str) -> str:
+    key = os.getenv("FAL_KEY", "")
+    if not key or key.startswith("your_"):
+        raise ValueError("FAL_KEY chưa được cài đặt trong .env")
+    endpoints = {
+        "kling-1.6":   "fal-ai/kling-video/v1.6/standard/text-to-video",
+        "runway-gen3": "fal-ai/runway-gen3/alpha/text-to-video",
+        "luma":        "fal-ai/luma-dream-machine/text-to-video",
+    }
+    url = f"https://fal.run/{endpoints.get(model, endpoints['kling-1.6'])}"
+    if model == "runway-gen3":
+        payload = {"prompt": prompt, "duration": duration,
+                   "ratio": "768:1280" if aspect_ratio == "9:16" else "1280:768"}
+    else:
+        payload = {"prompt": prompt, "duration": str(duration), "aspect_ratio": aspect_ratio}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+        method="POST", headers={"Authorization": f"Key {key}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            result = json.loads(r.read().decode())
+            if "video" in result:
+                return result["video"]["url"]
+            elif "videos" in result:
+                return result["videos"][0]["url"]
+            raise ValueError(f"Unexpected response: {str(result)[:200]}")
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"FAL.ai lỗi {e.code}: {e.read().decode()[:300]}")
+
 # ── Content Studio ─────────────────────────────────────────────────
 
 CONTENT_SYSTEM = """Bạn là Copywriter thực chiến và Chuyên gia Performance Marketing Facebook Ads với 14 năm kinh nghiệm, làm việc cho agency Độc Media. Chuyên môn: viết quảng cáo hard-sell, tối ưu tỷ lệ chuyển đổi, thu lead chất lượng cho dịch vụ thiết kế & thi công nhà phố cao cấp.
@@ -985,6 +1032,18 @@ class ChatBody(BaseModel):
 class ImageBody(BaseModel):
     description: str
     style: str = "Modern Minimalist"
+
+class VideoGenBody(BaseModel):
+    prompt: str
+    model: str = "kling-1.6"
+    duration: int = 5
+    aspect_ratio: str = "9:16"
+
+class ImageToVideoBody(BaseModel):
+    image_url: str
+    prompt: str = ""
+    duration: int = 5
+    aspect_ratio: str = "9:16"
 
 class ImageEnhanceBody(BaseModel):
     description: str
@@ -1615,6 +1674,28 @@ async def generate_image(body: ImageBody):
     except Exception as e:
         raise HTTPException(500, f"Loi tao anh: {str(e)[:200]}")
 
+# Video generation
+@app.post("/video/generate")
+async def video_generate(body: VideoGenBody):
+    try:
+        video_url = await asyncio.to_thread(_call_fal_video, body.prompt, body.model, body.duration, body.aspect_ratio)
+        return JSONResponse({"url": video_url})
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Lỗi tạo video: {str(e)[:200]}")
+
+# Image-to-video
+@app.post("/video/generate-from-image")
+async def video_from_image(body: ImageToVideoBody):
+    try:
+        video_url = await asyncio.to_thread(_call_fal_img2video, body.image_url, body.prompt, body.duration, body.aspect_ratio)
+        return JSONResponse({"url": video_url})
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Lỗi tạo video: {str(e)[:200]}")
+
 # Content Studio
 @app.post("/content/generate")
 async def content_generate(body: ContentBody):
@@ -1918,6 +1999,25 @@ HTML = """<!DOCTYPE html>
     .save-lib-btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
     .save-lib-status{font-size:12px;color:var(--text-3)}
 
+    /* ── VIDEO PANEL ── */
+    .vid-panel{border-top:1px solid var(--border);background:var(--surface);padding:16px 20px;flex-shrink:0}
+    .vid-panel-title{font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+    .vid-row{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:10px}
+    .vid-row label{font-size:11.5px;color:var(--text-2);font-weight:600;margin-bottom:4px;display:block}
+    .vid-prompt-wrap{flex:1;min-width:200px}
+    .vid-prompt-wrap textarea{width:100%;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12.5px;background:var(--surface-2);color:var(--text);resize:vertical;min-height:60px;outline:none}
+    .vid-prompt-wrap textarea:focus{border-color:var(--accent)}
+    .vid-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end}
+    .vid-gen-btn{background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;border:none;border-radius:10px;padding:9px 18px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;transition:opacity .15s}
+    .vid-gen-btn:hover{opacity:.88}
+    .vid-gen-btn:disabled{opacity:.4;cursor:not-allowed}
+    .vid-status{font-size:12px;color:var(--text-2);margin-top:6px}
+    .vid-result{margin-top:12px;display:none}
+    .vid-result video{width:100%;max-height:360px;border-radius:10px;background:#000}
+    .vid-result-actions{display:flex;gap:8px;margin-top:8px}
+    .vid-dl-btn{font-size:12px;padding:6px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);color:var(--text);text-decoration:none;font-weight:500}
+    .vid-timer{font-size:11px;color:var(--text-3);margin-left:4px}
+
     /* ── REPORT TAB ── */
     #tab-report{flex-direction:row;overflow:hidden}
     .rpt-form{width:280px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;padding:20px}
@@ -1969,6 +2069,8 @@ HTML = """<!DOCTYPE html>
     /* ── Tab content ── */
     .tab-content{display:none;flex:1;overflow:hidden}
     .tab-content.active{display:flex}
+    #tab-script{flex-direction:column}
+    #tab-script .studio-wrap{flex:1;min-height:0;overflow:hidden}
 
     /* ── CHAT TAB ── */
     #tab-chat{flex-direction:row}
@@ -2352,6 +2454,66 @@ HTML = """<!DOCTYPE html>
       <span class="save-lib-status" id="sc-save-status"></span>
     </div>
   </div>
+
+  <!-- VIDEO PANEL -->
+  <div class="vid-panel">
+    <div class="vid-panel-title">🎬 Tạo Video AI <span style="font-size:11px;font-weight:400;color:var(--text-3)">(Kling · Runway · Luma — powered by FAL.ai)</span></div>
+
+    <!-- Img2Video reference -->
+    <div id="vid-img-ref" style="display:none;margin-bottom:12px;padding:10px;background:var(--surface-2);border:1px solid #a855f7;border-radius:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <img id="vid-ref-img" src="" style="width:80px;height:56px;object-fit:cover;border-radius:6px;flex-shrink:0">
+        <div style="flex:1">
+          <div style="font-size:11.5px;font-weight:700;color:#a855f7;margin-bottom:2px">🖼 Chế độ Image-to-Video</div>
+          <div style="font-size:11px;color:var(--text-2)">Ảnh concept sẽ là frame đầu tiên của video</div>
+        </div>
+        <button onclick="clearImgRef()" style="font-size:11px;padding:4px 8px;background:var(--surface-3);border:1px solid var(--border);border-radius:6px;color:var(--text-3);cursor:pointer">✕ Bỏ</button>
+      </div>
+    </div>
+
+    <div class="vid-row">
+      <div class="vid-prompt-wrap">
+        <label>Prompt cảnh quay (tiếng Anh)</label>
+        <textarea id="vid-prompt" placeholder="VD: Luxurious living room reveal, camera slowly panning right, warm lighting, modern interior..."></textarea>
+        <button onclick="fillVidPromptFromScript()" style="margin-top:5px;font-size:11.5px;padding:4px 10px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;color:var(--text-2);cursor:pointer">📋 Lấy từ kịch bản</button>
+      </div>
+      <div class="vid-controls">
+        <div>
+          <label>Model</label>
+          <div class="seg-btns" id="vid-model-btns">
+            <button class="seg active" data-v="kling-1.6" title="Kling AI 1.6 — chất lượng cao nhất">Kling 1.6</button>
+            <button class="seg" data-v="luma" title="Luma Dream Machine">Luma</button>
+            <button class="seg" data-v="runway-gen3" title="Runway Gen-3 Alpha">Runway</button>
+          </div>
+        </div>
+        <div>
+          <label>Thời lượng</label>
+          <div class="seg-btns" id="vid-dur-btns">
+            <button class="seg active" data-v="5">5s</button>
+            <button class="seg" data-v="10">10s</button>
+          </div>
+        </div>
+        <div>
+          <label>Tỉ lệ</label>
+          <div class="seg-btns" id="vid-ratio-btns">
+            <button class="seg active" data-v="9:16">9:16</button>
+            <button class="seg" data-v="16:9">16:9</button>
+            <button class="seg" data-v="1:1">1:1</button>
+          </div>
+        </div>
+        <div style="padding-top:18px">
+          <button class="vid-gen-btn" id="vid-gen-btn" onclick="generateVideo()">🎬 Tạo video</button>
+        </div>
+      </div>
+    </div>
+    <div class="vid-status" id="vid-status"></div>
+    <div class="vid-result" id="vid-result">
+      <video id="vid-player" controls playsinline></video>
+      <div class="vid-result-actions">
+        <a id="vid-dl" href="" download class="vid-dl-btn">⬇ Tải video</a>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ── TAB: INTAKE CLIENT ── -->
@@ -2713,6 +2875,7 @@ HTML = """<!DOCTYPE html>
           <strong style="font-size:14px;color:var(--text)">Kết quả</strong>
           <div style="display:flex;gap:10px">
             <a id="img-dl" href="" target="_blank" download style="font-size:13px;padding:7px 16px;border:1px solid var(--border-2);border-radius:8px;background:var(--surface-2);color:var(--text);text-decoration:none;font-weight:500">&#x2B07; Tải xuống</a>
+            <button onclick="sendImgToVideo()" style="font-size:13px;padding:7px 16px;border:1px solid #a855f7;border-radius:8px;background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;cursor:pointer;font-weight:600">🎬 Tạo video từ ảnh</button>
             <button onclick="addImgToChat(); showTab('chat')" style="font-size:13px;padding:7px 16px;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:#fff;cursor:pointer;font-weight:600">Thêm vào Chat</button>
           </div>
         </div>
@@ -2840,6 +3003,9 @@ window.onload = async ()=>{
   setupSegs('lib-type-btns');
   setupSegs('rpt-model-btns');
   setupSegs('img-model-btns');
+  setupSegs('vid-model-btns');
+  setupSegs('vid-dur-btns');
+  setupSegs('vid-ratio-btns');
   document.querySelectorAll('.schip').forEach(c=>c.addEventListener('click',()=>{
     document.querySelectorAll('.schip').forEach(x=>x.classList.remove('active'));
     c.classList.add('active');
@@ -3718,6 +3884,79 @@ async function exportLibrary(fmt){
     const fname = match ? decodeURIComponent(match[1]) : 'ThuVien.'+fmt;
     const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname; a.click();
   }catch(e){ alert('Lỗi xuất: '+e.message); }
+}
+
+// ── VIDEO GENERATION ──
+let _vidTimer = null;
+let _vidRefImageUrl = '';
+
+function sendImgToVideo(){
+  if(!genImgUrl){ alert('Chưa có ảnh — tạo ảnh trước nhé!'); return; }
+  _vidRefImageUrl = genImgUrl;
+  $('vid-ref-img').src = genImgUrl;
+  $('vid-img-ref').style.display = 'block';
+  // Hint prompt
+  if(!$('vid-prompt').value.trim()){
+    $('vid-prompt').value = 'Camera slowly reveals the space, smooth cinematic motion, warm ambient lighting';
+  }
+  showTab('script');
+  setTimeout(()=>{ $('vid-prompt').scrollIntoView({behavior:'smooth'}); }, 300);
+}
+
+function clearImgRef(){
+  _vidRefImageUrl = '';
+  $('vid-img-ref').style.display = 'none';
+  $('vid-ref-img').src = '';
+}
+
+function fillVidPromptFromScript(){
+  const scText = $('sc-text');
+  if(!scText || !scText.innerText.trim()){ alert('Tạo kịch bản trước nhé anh!'); return; }
+  const lines = scText.innerText.split('\\n').filter(l => l.trim().length > 10);
+  const preview = lines.slice(0,3).join(' ').slice(0,300);
+  $('vid-prompt').value = preview;
+}
+
+async function generateVideo(){
+  const prompt   = $('vid-prompt').value.trim();
+  const duration = parseInt(getSegVal('vid-dur-btns') || '5');
+  const ratio    = getSegVal('vid-ratio-btns') || '9:16';
+  const isImg2Vid = !!_vidRefImageUrl;
+
+  if(!isImg2Vid && !prompt){ $('vid-prompt').focus(); alert('Nhập prompt cảnh quay trước nhé!'); return; }
+
+  const btn = $('vid-gen-btn');
+  btn.disabled = true;
+  $('vid-result').style.display = 'none';
+  let secs = 0;
+  const modeLabel = isImg2Vid ? '🖼→🎬 Image-to-Video' : '🎬 Text-to-Video';
+  $('vid-status').innerHTML = '⏳ ' + modeLabel + '... <span class="vid-timer" id="vid-timer">0s</span>';
+  _vidTimer = setInterval(()=>{ secs++; const t=$('vid-timer'); if(t) t.textContent=secs+'s'; }, 1000);
+
+  try{
+    let res;
+    if(isImg2Vid){
+      res = await fetch('/video/generate-from-image', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image_url: _vidRefImageUrl, prompt, duration, aspect_ratio: ratio})});
+    } else {
+      const model = getSegVal('vid-model-btns') || 'kling-1.6';
+      res = await fetch('/video/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({prompt, model, duration, aspect_ratio: ratio})});
+    }
+    if(!res.ok){ const t=await res.text(); throw new Error(t); }
+    const d = await res.json();
+    clearInterval(_vidTimer);
+    $('vid-status').textContent = '✅ Hoàn thành! (' + secs + 's)';
+    $('vid-player').src = d.url;
+    $('vid-dl').href = d.url;
+    $('vid-result').style.display = 'block';
+    $('vid-player').play();
+  }catch(e){
+    clearInterval(_vidTimer);
+    $('vid-status').textContent = '❌ Lỗi: ' + e.message.slice(0,120);
+  }finally{
+    btn.disabled = false;
+  }
 }
 
 // ── REPORT ──
